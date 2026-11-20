@@ -1,0 +1,323 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<style>:root{padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}body{margin:0}</style>
+<title>Ring Hopper</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Chakra+Petch:wght@500;700&family=IBM+Plex+Mono:wght@400;600&display=swap">
+<style>
+/* Layout: one full-bleed canvas; HUD pinned top, title/game-over card centered over the orbit. Single deliberate dark look. */
+:root {
+  --void: #070b1a;
+  --ink: #e9ecff;
+  --dim: #7d86b8;
+  --sun: #ffb347;
+  --hop: #6ef2ff;
+  --rock: #ff5470;
+  --gem: #c79bff;
+  --display: "Chakra Petch", "Avenir Next Condensed", system-ui, sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, Menlo, monospace;
+  color-scheme: dark;
+}
+html, body { height: 100%; }
+body { background: var(--void); color: var(--ink); font-family: var(--mono); overflow: hidden; touch-action: none; user-select: none; -webkit-user-select: none; }
+canvas { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
+.hud { position: fixed; top: 0; left: 0; right: 0; display: flex; justify-content: space-between; align-items: flex-start;
+  padding-top: calc(14px + env(safe-area-inset-top, 0px)); padding-bottom: 0;
+  padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); pointer-events: none; }
+.stat { display: grid; gap: 2px; }
+.stat.r { text-align: right; }
+.lbl { font-size: 11px; letter-spacing: .14em; text-transform: uppercase; color: var(--dim); }
+.val { font-family: var(--display); font-weight: 700; font-size: 30px; font-variant-numeric: tabular-nums; line-height: 1; }
+#combo { color: var(--gem); font-size: 13px; min-height: 1.2em; }
+.stat.mid { text-align: center; justify-items: center; }
+.heat { width: min(28vw, 140px); height: 8px; border-radius: 4px; background: rgba(125,134,184,.2); overflow: hidden; margin-top: 4px; }
+.heat i { display: block; height: 100%; width: 0; background: linear-gradient(90deg, var(--sun), var(--rock)); transition: width .1s linear; }
+#alert { font-family: var(--display); font-weight: 700; font-size: 13px; letter-spacing: .18em; color: var(--rock); min-height: 1.4em; margin-top: 4px; }
+.card { position: fixed; inset: 0; display: grid; place-items: center; pointer-events: none;
+  padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); }
+.card > div { text-align: center; display: grid; gap: 14px; max-width: 30ch; }
+h1 { margin: 0; font-family: var(--display); font-weight: 700; font-size: clamp(40px, 9vw, 76px); letter-spacing: .04em; line-height: .95; text-wrap: balance;
+  text-shadow: 0 0 24px rgba(110, 242, 255, .35); }
+h1 span { color: var(--hop); }
+.card p { margin: 0; color: var(--dim); font-size: 14px; line-height: 1.6; }
+.card .go { color: var(--ink); font-family: var(--display); font-size: 18px; letter-spacing: .12em; text-transform: uppercase; animation: pulse 1.4s ease-in-out infinite; }
+kbd { font-family: var(--mono); border: 1px solid var(--dim); border-radius: 4px; padding: 0 5px; color: var(--ink); }
+@keyframes pulse { 50% { opacity: .45; } }
+@media (prefers-reduced-motion: reduce) { .card .go { animation: none; } }
+</style>
+
+<canvas id="c"></canvas>
+<div class="hud">
+  <div class="stat"><span class="lbl">Score</span><span class="val" id="score">0</span><span id="combo"></span></div>
+  <div class="stat mid"><span class="lbl">Heat</span><div class="heat"><i id="heat"></i></div><span id="alert"></span></div>
+  <div class="stat r"><span class="lbl">Best</span><span class="val" id="best">0</span></div>
+</div>
+<div class="card" id="card"><div>
+  <h1>RING<br><span>HOPPER</span></h1>
+  <p>Your probe circles a young star. Rocks sweep the other way. Hop between orbits to dodge them and grab the violet shards.</p>
+  <p>Inner orbits run faster. Hug the star too long and you overheat. When it eclipses, you only see rocks close by.</p>
+  <p><kbd>Space</kbd> / tap: hop outward &nbsp;·&nbsp; <kbd>↓</kbd>: hop inward</p>
+  <div class="go" id="go">Tap to launch</div>
+</div></div>
+
+<script>
+(() => {
+const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+const $score = document.getElementById('score'), $best = document.getElementById('best'), $combo = document.getElementById('combo');
+const $card = document.getElementById('card');
+let W, H, DPR, cx, cy, R = [];
+const PR = () => Math.max(7, R[0] * 0.09); // player radius
+
+function resize() {
+  DPR = Math.min(2, window.devicePixelRatio || 1);
+  W = innerWidth; H = innerHeight;
+  cv.width = W * DPR; cv.height = H * DPR; ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  cx = W / 2; cy = H / 2 + 18;
+  const m = Math.min(W, H - 80) / 2;
+  R = [m * 0.36, m * 0.6, m * 0.84];
+}
+addEventListener('resize', resize); resize();
+
+let best = 0; try { best = +localStorage.getItem('ringhopper-best') || 0; } catch (e) {}
+$best.textContent = best;
+
+// stars backdrop
+const stars = Array.from({ length: 140 }, () => ({ x: Math.random(), y: Math.random(), s: Math.random() * 1.4 + .2, t: Math.random() * 6 }));
+
+// --- audio ---
+let ac = null;
+function beep(f, d = .08, type = 'sine', v = .12, slide = 0) {
+  if (!ac) return;
+  const o = ac.createOscillator(), g = ac.createGain(), t = ac.currentTime;
+  o.type = type; o.frequency.setValueAtTime(f, t);
+  if (slide) o.frequency.exponentialRampToValueAtTime(Math.max(30, f + slide), t + d);
+  g.gain.setValueAtTime(v, t); g.gain.exponentialRampToValueAtTime(.0001, t + d);
+  o.connect(g).connect(ac.destination); o.start(t); o.stop(t + d + .02);
+}
+
+// --- state ---
+let state = 'title', S;
+function newGame() {
+  S = { a: -Math.PI / 2, ring: 1, r: R[1], rFrom: R[1], hopT: 1, w: 1.5, t: 0, score: 0, shards: 0, combo: 0, comboT: 0,
+        rocks: [], gems: [], parts: [], trail: [], spawnT: 1.2, gemT: 2, shake: 0, dead: 0,
+        heat: 0, eclT: 22 + Math.random() * 8, ecl: 0, cause: '' };
+}
+newGame();
+
+function hop(dir) {
+  if (state !== 'play') { if (state === 'title' || (state === 'over' && S.dead > .6)) start(); return; }
+  S.rFrom = S.r; S.ring = (S.ring + dir + 3) % 3; S.hopT = 0;
+  beep(dir > 0 ? 520 : 380, .09, 'triangle', .1, dir > 0 ? 260 : -140);
+  for (let i = 0; i < 6; i++) puff(S.r, S.a, '#6ef2ff', 60);
+}
+function start() {
+  if (!ac) { try { ac = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) {} }
+  ac && ac.resume && ac.resume();
+  newGame(); state = 'play'; $card.hidden = true; beep(330, .15, 'sine', .1, 330);
+}
+
+addEventListener('keydown', e => {
+  if (e.repeat) return;
+  if (e.code === 'Space' || e.code === 'ArrowUp' || e.code === 'KeyW' || e.code === 'Enter') { e.preventDefault(); hop(1); }
+  else if (e.code === 'ArrowDown' || e.code === 'KeyS') { e.preventDefault(); hop(-1); }
+});
+cv.addEventListener('pointerdown', e => { e.preventDefault(); hop(1); });
+$card.addEventListener('pointerdown', e => hop(1));
+document.addEventListener('pointerdown', e => { if (state !== 'play') hop(1); });
+
+function pos(r, a) { return [cx + Math.cos(a) * r, cy + Math.sin(a) * r]; }
+function puff(r, a, col, sp) {
+  const [x, y] = pos(r, a), k = Math.random() * Math.PI * 2, v = Math.random() * sp;
+  S.parts.push({ x, y, vx: Math.cos(k) * v, vy: Math.sin(k) * v, life: .5 + Math.random() * .4, max: .9, col });
+}
+const angDiff = (a, b) => { let d = (a - b) % (Math.PI * 2); if (d > Math.PI) d -= Math.PI * 2; if (d < -Math.PI) d += Math.PI * 2; return d; };
+
+function spawnRock() {
+  const lvl = Math.min(1, S.t / 90);
+  // pick rings; at higher levels sometimes two rings at once, never all three
+  const n = Math.random() < .15 + lvl * .4 ? 2 : 1;
+  const rings = [0, 1, 2].sort(() => Math.random() - .5).slice(0, n);
+  const base = S.a + Math.PI + (Math.random() - .5) * .8;
+  const sp = -(0.55 + lvl * 0.9 + Math.random() * .3);
+  // gravity: inner orbits are faster, outer slower
+  for (const ri of rings) S.rocks.push({ ring: ri, a: base, w: sp * [1.4, 1, .72][ri], rot: Math.random() * 6, vr: (Math.random() - .5) * 4,
+    shape: Array.from({ length: 8 }, () => .75 + Math.random() * .4) });
+}
+function spawnGem() {
+  S.gems.push({ ring: Math.floor(Math.random() * 3), a: S.a + Math.PI * (.6 + Math.random() * .8), w: -.25, t: 0 });
+}
+
+function die(cause) {
+  S.cause = cause || 'Hit a rock';
+  document.getElementById('heat').style.width = '0';
+  document.getElementById('alert').textContent = '';
+  state = 'over'; S.dead = 0; S.shake = 16;
+  for (let i = 0; i < 40; i++) puff(S.r, S.a, i % 2 ? '#ff5470' : '#ffb347', 260);
+  beep(160, .5, 'sawtooth', .14, -120);
+  const sc = Math.floor(S.score);
+  if (sc > best) { best = sc; try { localStorage.setItem('ringhopper-best', best); } catch (e) {} }
+  $best.textContent = best;
+  setTimeout(() => {
+    $card.querySelector('h1').innerHTML = sc >= best && sc > 0 ? 'NEW<br><span>BEST</span>' : 'PROBE<br><span>LOST</span>';
+    $card.querySelectorAll('p')[1].textContent = S.cause + '.';
+    $card.querySelectorAll('p')[0].textContent = `Score ${sc} · ${S.shards} shard${S.shards === 1 ? '' : 's'} · survived ${S.t.toFixed(1)}s`;
+    document.getElementById('go').textContent = 'Tap to relaunch';
+    $card.hidden = false;
+  }, 650);
+}
+
+function update(dt) {
+  if (state === 'over') { S.dead += dt; }
+  for (const p of S.parts) { p.x += p.vx * dt; p.y += p.vy * dt; p.vx *= .96; p.vy *= .96; p.life -= dt; }
+  S.parts = S.parts.filter(p => p.life > 0);
+  S.shake *= .88;
+  if (state !== 'play') return;
+
+  S.t += dt;
+  const lvl = Math.min(1, S.t / 90);
+  S.w = 1.5 + lvl * 1.3;
+  S.a += S.w * dt;
+  S.hopT = Math.min(1, S.hopT + dt / .13);
+  const e = 1 - Math.pow(1 - S.hopT, 3);
+  S.r = S.rFrom + (R[S.ring] - S.rFrom) * e;
+  S.score += dt * (4 + lvl * 6);
+  if (S.comboT > 0) { S.comboT -= dt; if (S.comboT <= 0) S.combo = 0; }
+
+  // heat: the inner orbit cooks the probe
+  S.heat = Math.max(0, Math.min(100, S.heat + (S.ring === 0 ? 30 : -22) * dt));
+  document.getElementById('heat').style.width = S.heat + '%';
+  if (S.heat >= 100) { die('Overheated on the inner orbit'); return; }
+  // eclipse: star goes dark, only nearby rocks visible
+  if (S.ecl > 0) { S.ecl -= dt; if (S.ecl <= 0) S.eclT = 14 + Math.random() * 10; }
+  else { S.eclT -= dt; if (S.eclT <= 0) { S.ecl = 4.5; beep(110, .6, 'sine', .12, -50); } }
+  document.getElementById('alert').textContent = S.ecl > 0 ? 'ECLIPSE' : S.eclT < 2 ? 'ECLIPSE INCOMING' : S.heat > 70 ? 'OVERHEATING' : '';
+
+  S.trail.push(pos(S.r, S.a)); if (S.trail.length > 18) S.trail.shift();
+
+  S.spawnT -= dt;
+  if (S.spawnT <= 0) { spawnRock(); S.spawnT = 1.25 - lvl * .6 + Math.random() * .4; }
+  S.gemT -= dt;
+  if (S.gemT <= 0) { spawnGem(); S.gemT = 2.2 + Math.random() * 1.5; }
+
+  const [px, py] = pos(S.r, S.a), pr = PR();
+  for (const r of S.rocks) {
+    r.a += r.w * dt; r.rot += r.vr * dt; r.life = (r.life || 0) + dt;
+    const [x, y] = pos(R[r.ring], r.a), rr = R[0] * .11;
+    if (Math.hypot(x - px, y - py) < pr * .8 + rr * .85) { die(); return; }
+    // near miss
+    if (!r.near && Math.hypot(x - px, y - py) < pr + rr * 2.2 && Math.abs(angDiff(r.a, S.a)) < .3) { r.near = true; S.score += 3; }
+  }
+  S.rocks = S.rocks.filter(r => r.life < 9);
+  for (const g of S.gems) {
+    g.a += g.w * dt; g.t += dt;
+    const [x, y] = pos(R[g.ring], g.a);
+    if (!g.got && Math.hypot(x - px, y - py) < pr + R[0] * .09) {
+      g.got = true; S.shards++; S.combo++; S.comboT = 3.5;
+      S.score += 10 * S.combo;
+      beep(700 + S.combo * 90, .12, 'square', .06, 400);
+      for (let i = 0; i < 14; i++) puff(R[g.ring], g.a, '#c79bff', 140);
+    }
+  }
+  S.gems = S.gems.filter(g => !g.got && g.t < 10);
+
+  $score.textContent = Math.floor(S.score);
+  $combo.textContent = S.combo > 1 ? `×${S.combo} shard chain` : '';
+}
+
+let T = 0;
+function draw(dt) {
+  T += dt;
+  ctx.save();
+  ctx.fillStyle = '#070b1a'; ctx.fillRect(0, 0, W, H);
+  if (S.shake > .3) ctx.translate((Math.random() - .5) * S.shake, (Math.random() - .5) * S.shake);
+
+  for (const s of stars) {
+    ctx.globalAlpha = .35 + .35 * Math.sin(T * 1.3 + s.t);
+    ctx.fillStyle = '#c9d0ff'; ctx.fillRect(s.x * W, s.y * H, s.s, s.s);
+  }
+  ctx.globalAlpha = 1;
+
+  // sun (dims during an eclipse)
+  const dark = state === 'play' && S.ecl > 0 ? Math.min(1, S.ecl * 2, (4.5 - S.ecl) * 3) : 0;
+  ctx.globalAlpha = 1 - dark * .9;
+  const sr = R[0] * .42, pul = 1 + Math.sin(T * 2) * .04;
+  const g = ctx.createRadialGradient(cx, cy, 0, cx, cy, sr * 3.2);
+  g.addColorStop(0, 'rgba(255,179,71,.55)'); g.addColorStop(.35, 'rgba(255,120,60,.15)'); g.addColorStop(1, 'rgba(255,120,60,0)');
+  ctx.fillStyle = g; ctx.beginPath(); ctx.arc(cx, cy, sr * 3.2, 0, 7); ctx.fill();
+  ctx.fillStyle = '#ffd59a'; ctx.beginPath(); ctx.arc(cx, cy, sr * pul, 0, 7); ctx.fill();
+  ctx.fillStyle = '#fff3dc'; ctx.beginPath(); ctx.arc(cx, cy, sr * .6 * pul, 0, 7); ctx.fill();
+  ctx.globalAlpha = 1;
+  if (dark) { ctx.strokeStyle = `rgba(255,213,154,${dark * .8})`; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(cx, cy, sr, 0, 7); ctx.stroke(); }
+
+  // rings
+  R.forEach((r, i) => {
+    const active = state === 'play' && S.ring === i;
+    ctx.strokeStyle = active ? 'rgba(110,242,255,.45)' : 'rgba(125,134,184,.22)';
+    ctx.lineWidth = active ? 2 : 1; ctx.setLineDash(active ? [] : [3, 7]);
+    ctx.beginPath(); ctx.arc(cx, cy, r, 0, 7); ctx.stroke();
+  });
+  ctx.setLineDash([]);
+
+  // gems
+  for (const gm of S.gems) {
+    const [x, y] = pos(R[gm.ring], gm.a), s = R[0] * .07 * (1 + Math.sin(gm.t * 6) * .12);
+    ctx.save(); ctx.translate(x, y); ctx.rotate(gm.t * 2);
+    ctx.shadowColor = '#c79bff'; ctx.shadowBlur = 16; ctx.fillStyle = '#c79bff';
+    ctx.beginPath(); ctx.moveTo(0, -s * 1.3); ctx.lineTo(s, 0); ctx.lineTo(0, s * 1.3); ctx.lineTo(-s, 0); ctx.closePath(); ctx.fill();
+    ctx.restore();
+  }
+
+  // rocks
+  for (const r of S.rocks) {
+    const [x, y] = pos(R[r.ring], r.a), rr = R[0] * .11;
+    if (dark) { const [qx, qy] = pos(S.r, S.a), d = Math.hypot(x - qx, y - qy), see = R[0] * 1.5;
+      const vis = 1 - dark * Math.min(1, Math.max(0, (d - see) / (see * .5))); if (vis <= .02) continue; ctx.globalAlpha = vis; }
+    ctx.save(); ctx.translate(x, y); ctx.rotate(r.rot);
+    ctx.shadowColor = '#ff5470'; ctx.shadowBlur = 12;
+    ctx.fillStyle = '#3a1424'; ctx.strokeStyle = '#ff5470'; ctx.lineWidth = 2;
+    ctx.beginPath();
+    r.shape.forEach((k, i) => { const an = i / r.shape.length * Math.PI * 2; ctx[i ? 'lineTo' : 'moveTo'](Math.cos(an) * rr * k, Math.sin(an) * rr * k); });
+    ctx.closePath(); ctx.fill(); ctx.stroke(); ctx.restore();
+    ctx.globalAlpha = 1;
+  }
+
+  // player
+  if (state !== 'over') {
+    S.trail.forEach(([x, y], i) => {
+      const k = i / S.trail.length;
+      ctx.fillStyle = `rgba(110,242,255,${k * .35})`;
+      ctx.beginPath(); ctx.arc(x, y, PR() * k * .8, 0, 7); ctx.fill();
+    });
+    const [px, py] = state === 'title' ? pos(R[1], T * 1.2 - Math.PI / 2) : pos(S.r, S.a);
+    const hk = state === 'play' ? S.heat / 100 : 0;
+    const pc = `rgb(${110 + 145 * hk | 0},${242 - 150 * hk | 0},${255 - 180 * hk | 0})`;
+    ctx.shadowColor = pc; ctx.shadowBlur = 20; ctx.fillStyle = pc;
+    ctx.beginPath(); ctx.arc(px, py, PR(), 0, 7); ctx.fill();
+    ctx.shadowBlur = 0; ctx.fillStyle = '#e9ffff';
+    ctx.beginPath(); ctx.arc(px, py, PR() * .45, 0, 7); ctx.fill();
+  }
+
+  for (const p of S.parts) {
+    ctx.globalAlpha = Math.max(0, p.life / p.max); ctx.fillStyle = p.col;
+    ctx.fillRect(p.x - 2, p.y - 2, 4, 4);
+  }
+  ctx.globalAlpha = 1;
+  ctx.restore();
+}
+
+let last = performance.now();
+function loop(now) {
+  const dt = Math.min(.05, (now - last) / 1000); last = now;
+  update(dt); draw(dt);
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+window.__rh = { get state() { return state; }, get S() { return S; }, hop };
+})();
+</script>
+
+</html>
